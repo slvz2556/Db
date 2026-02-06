@@ -1,0 +1,31 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+	<Title>SLVZ Database</Title>
+	<Company>SLVZ</Company>
+	<Authors>SLVZ</Authors>
+	<Product>SLVZ Database</Product>
+	<PackageIcon>icon.png</PackageIcon>
+	<AssemblyTitle>SLVZ Db</AssemblyTitle>
+	<AssemblyName>SLVZ.Db</AssemblyName>
+	<PackageLicenseExpression>MIT</PackageLicenseExpression>
+	<PackageReadmeFile>README.md</PackageReadmeFile>
+	<Version>1.21</Version>
+	<AssemblyVersion>1.21</AssemblyVersion>
+	<FileVersion>1.21</FileVersion>
+	<PackageTags>C#, Database</PackageTags>
+	<Description>Simple local file database for C#</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+	<Resource Include="icon.png">
+		<Pack>True</Pack>
+		<PackagePath>\</PackagePath>
+	</Resource>
+	<None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

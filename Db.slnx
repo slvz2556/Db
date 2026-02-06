@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="ConsoleTest/ConsoleTest.csproj" />
+  <Project Path="SLVZ.Db/SLVZ.Db.csproj" />
+</Solution>
