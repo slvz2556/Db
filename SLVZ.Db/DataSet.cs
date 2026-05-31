@@ -45,8 +45,8 @@ public class DataSet<TModel>
 
         File.SetAttributes(path, FileAttributes.Hidden);
 
-        _props = ModelType.GetProperties().Where(p => p.CanRead || p.CanWrite).ToArray();
-        _propDict = _props.Where(p => p.CanWrite).ToDictionary(p => p.Name);
+        _props = ModelType.GetProperties().Where(p => (p.CanRead || p.CanWrite) && p.GetCustomAttribute<Ignore>() is null).ToArray();
+        _propDict = _props.Where(p => p.CanWrite && p.GetCustomAttribute<Ignore>() is null).ToDictionary(p => p.Name);
 
         Context = _context;
     }

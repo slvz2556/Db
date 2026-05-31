@@ -8,3 +8,7 @@ namespace SLVZ.Db;
 public sealed class PrimaryKey : Attribute
 {
 }
+[AttributeUsage(AttributeTargets.All)]
+public sealed class Ignore : Attribute
+{
+}

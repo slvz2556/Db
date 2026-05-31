@@ -9,3 +9,8 @@ namespace SLVZ.Db.Light;
 public sealed class Key : Attribute
 {
 }
+
+[AttributeUsage(AttributeTargets.All)]
+public sealed class Ignore : Attribute
+{
+}

@@ -567,7 +567,6 @@ public abstract class DbContext
                         Position = point2.Position
                     };
 
-                    writer.Close();
 
 
                     var orderedByPosition = points.OrderBy(x => x.Position).ToList();
@@ -579,7 +578,7 @@ public abstract class DbContext
                             points.Remove(orderedByPosition[^1]);
                         }
                     }
-
+                    writer.Close();
                     await UpdateFreeSpaces(points);
 
                     return myIndex;
@@ -610,8 +609,6 @@ public abstract class DbContext
                         point2.Position += point2.Length;
                     }
 
-                    writer.Close();
-
 
                     var orderedByPosition = points.OrderBy(x => x.Position).ToList();
                     if (orderedByPosition.Count() > 0)
@@ -622,7 +619,7 @@ public abstract class DbContext
                             points.Remove(orderedByPosition[^1]);
                         }
                     }
-
+                    writer.Close();
                     await UpdateFreeSpaces(points);
 
                     return myIndex;

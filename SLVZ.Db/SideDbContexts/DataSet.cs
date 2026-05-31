@@ -26,7 +26,7 @@ public partial class DataSet<TModel>
         var primaryKey = properties.Where(x => x.GetCustomAttribute<Key>() is not null).First();
 
         this.KeyName = primaryKey.Name;
-     
+
         if (string.IsNullOrEmpty(KeyName) || string.IsNullOrEmpty(FilePath))
             throw new InvalidOperationException("Both Key and FilePath must be set in Configuration().");
     }
@@ -68,7 +68,9 @@ public partial class DataSet<TModel>
 
             foreach (var prop in properties)
             {
-                if (prop.Name != KeyName && prop.CanRead && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
+                if (prop.GetCustomAttribute<Ignore>() is not null) { }
+
+                else if (prop.Name != KeyName && prop.CanRead && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
                     && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte))
                 {
                     var value = ModelType.GetProperty(prop.Name)?.GetValue(model)?.ToString();
@@ -77,7 +79,7 @@ public partial class DataSet<TModel>
                     if (type == typeof(string) && !string.IsNullOrEmpty(value))
                         value = value.Replace("\n", "<db.break/>");
 
-                    if(!string.IsNullOrEmpty(value))
+                    if (!string.IsNullOrEmpty(value))
                         str += $"<db.{prop.Name}>{value}</db.{prop.Name}><db.br/>";
                 }
             }
@@ -131,7 +133,9 @@ public partial class DataSet<TModel>
 
                 foreach (var prop in properties)
                 {
-                    if (prop.Name != KeyName && prop.CanRead && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
+                    if (prop.GetCustomAttribute<Ignore>() is not null) { }
+
+                    else if(prop.Name != KeyName && prop.CanRead && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
                     && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte))
                     {
                         var value = ModelType.GetProperty(prop.Name)?.GetValue(model)?.ToString();
@@ -281,8 +285,10 @@ public partial class DataSet<TModel>
                 {
                     foreach (var prop in ModelType.GetProperties())
                     {
-                        if (prop.CanWrite && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
-                    && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte))
+                        if (prop.GetCustomAttribute<Ignore>() is not null) { }
+
+                        else if (prop.CanWrite && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
+                        && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte))
                         {
                             string value = parameter.Replace($"<db.{prop.Name}>", "").Replace($"</db.{prop.Name}>", "").Replace("<db.break/>", "\n");
 
@@ -323,6 +329,7 @@ public partial class DataSet<TModel>
 
         return (TModel)Convert.ChangeType(instance, ModelType);
     }
+
 
 
 
@@ -528,8 +535,10 @@ public partial class DataSet<TModel>
 
                     foreach (var prop in properties)
                     {
-                        if (prop.Name != KeyName && prop.CanRead && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
-                    && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte))
+                        if (prop.GetCustomAttribute<Ignore>() is not null) { }
+
+                        else if (prop.Name != KeyName && prop.CanRead && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
+                                && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte))
                         {
                             var value = ModelType.GetProperty(prop.Name)?.GetValue(model)?.ToString();
                             var type = prop.PropertyType;
@@ -619,7 +628,9 @@ public partial class DataSet<TModel>
 
                             foreach (var prop in properties)
                             {
-                                if (prop.Name != KeyName && prop.CanRead && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
+                                if (prop.GetCustomAttribute<Ignore>() is not null) { }
+
+                                else if (prop.Name != KeyName && prop.CanRead && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
                                     && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte))
                                 {
                                     var value = ModelType.GetProperty(prop.Name)?.GetValue(model)?.ToString();
@@ -701,7 +712,9 @@ public partial class DataSet<TModel>
             {
                 foreach (var prop in ModelType.GetProperties())
                 {
-                    if (prop.CanWrite && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
+                    if (prop.GetCustomAttribute<Ignore>() is not null) { }
+
+                    else if (prop.CanWrite && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
                     && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte))
                     {
                         string value = parameter.Replace($"<db.{prop.Name}>", "").Replace($"</db.{prop.Name}>", "").Replace("<db.break/>", "\n");
@@ -784,7 +797,9 @@ public partial class DataSet<TModel>
             {
                 foreach (var prop in ModelType.GetProperties())
                 {
-                    if (prop.CanWrite && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
+                    if (prop.GetCustomAttribute<Ignore>() is not null) { }
+
+                    else if (prop.CanWrite && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
                     && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte))
                     {
                         string value = parameter.Replace($"<db.{prop.Name}>", "").Replace($"</db.{prop.Name}>", "").Replace("<db.break/>", "\n");
