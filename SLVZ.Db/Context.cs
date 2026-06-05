@@ -568,6 +568,7 @@ public abstract class DbContext
                     };
 
 
+
                     var orderedByPosition = points.OrderBy(x => x.Position).ToList();
                     if (orderedByPosition.Count() > 0)
                     {
