@@ -135,7 +135,7 @@ public partial class DataSet<TModel>
                 {
                     if (prop.GetCustomAttribute<Ignore>() is not null) { }
 
-                    else if(prop.Name != KeyName && prop.CanRead && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
+                    else if (prop.Name != KeyName && prop.CanRead && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
                     && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte))
                     {
                         var value = ModelType.GetProperty(prop.Name)?.GetValue(model)?.ToString();
@@ -241,6 +241,88 @@ public partial class DataSet<TModel>
         }
 
         return objects;
+
+    }
+
+
+
+    /// <summary>
+    /// Retrieves first model stored in the database.
+    /// </summary>
+    public async Task<TModel> First()
+    {
+        if (ModelType == null)
+            throw new InvalidOperationException("Model type is not set.");
+
+        if (typeof(TModel) != ModelType)
+            throw new InvalidOperationException($"This configuration only works with model type {ModelType.Name}.");
+
+        var instance = Activator.CreateInstance(ModelType);
+
+        if (!File.Exists(FilePath))
+            return (TModel)Convert.ChangeType(instance, ModelType);
+
+        FileStream file = null;
+
+        while (file is null)
+        {
+            try
+            {
+                file = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.Read, 60 * 1024, true);
+            }
+            catch { await Task.Delay(150); }
+        }
+
+        using var reader = new StreamReader(file);
+        string line;
+        if (reader.Peek() != -1)
+        {
+            line = reader.ReadLine();
+
+            foreach (var parameter in line.Split("<db.br/>"))
+            {
+                foreach (var prop in ModelType.GetProperties())
+                {
+                    if (prop.GetCustomAttribute<Ignore>() is not null) { }
+
+                    else if (prop.CanWrite && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte[])
+                    && ModelType.GetProperty(prop.Name).PropertyType != typeof(Byte))
+                    {
+                        string value = parameter.Replace($"<db.{prop.Name}>", "").Replace($"</db.{prop.Name}>", "").Replace("<db.break/>", "\n");
+
+                        if (parameter.StartsWith($"<db.{prop.Name}>") && !prop.PropertyType.IsEnum)
+                        {
+                            if (prop.PropertyType == typeof(string))
+                            {
+
+                                prop.SetValue(instance, value);
+                            }
+                            else
+                            {
+                                var final = Convert.ChangeType(value, prop.PropertyType);
+                                prop.SetValue(instance, final);
+
+                            }
+                            break;
+                        }
+                        else if (parameter.StartsWith($"<db.{prop.Name}>") && prop.PropertyType.IsEnum)
+                        {
+                            object convertedValue = value;
+                            if (convertedValue is string strVal)
+                                convertedValue = Enum.Parse(prop.PropertyType, strVal);
+                            else
+                                convertedValue = Enum.ToObject(prop.PropertyType, convertedValue);
+
+                            prop.SetValue(instance, convertedValue);
+
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        return (TModel)Convert.ChangeType(instance, ModelType);
 
     }
 
