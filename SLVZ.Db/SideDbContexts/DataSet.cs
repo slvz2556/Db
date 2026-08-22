@@ -247,6 +247,49 @@ public partial class DataSet<TModel>
 
 
     /// <summary>
+    /// Retrieves count of models stored in the database.
+    /// </summary>
+    public async Task<int> Count()
+    {
+        if (ModelType == null)
+            throw new InvalidOperationException("Model type is not set.");
+
+        if (typeof(TModel) != ModelType)
+            throw new InvalidOperationException($"This configuration only works with model type {ModelType.Name}.");
+
+        List<TModel> objects = new List<TModel>();
+
+
+        if (!File.Exists(FilePath))
+            return 0;
+
+        FileStream file = null;
+
+        while (file is null)
+        {
+            try
+            {
+                file = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.Read, 60 * 1024, true);
+            }
+            catch { await Task.Delay(150); }
+        }
+
+        using var reader = new StreamReader(file);
+        int count = 0;
+        while (reader.Peek() != -1)
+        {
+            reader.ReadLine();
+            count++;
+        }
+
+        return count;
+
+    }
+
+
+
+
+    /// <summary>
     /// Retrieves first model stored in the database.
     /// </summary>
     public async Task<TModel> First()
