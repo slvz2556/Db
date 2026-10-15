@@ -3,7 +3,7 @@
 ################################################################################
 
 /ConsoleTest/obj
-/SLVZ.Db/bin/Release/net10.0
+/SLVZ.Db/bin
 /SLVZ.Db/obj
 /.vs/Db.slnx/DesignTimeBuild
 /.vs/Db.slnx/config
