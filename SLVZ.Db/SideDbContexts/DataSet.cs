@@ -1,8 +1,11 @@
 ﻿#nullable disable
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace SLVZ.Db.Light;
@@ -16,6 +19,55 @@ public static class DbLog
     public static Action<string> Log { get; set; }
 }
 
+#if DBTEST
+// Only compiled when the DBTEST symbol is defined (the test project). Lets tests kill the process at an exact step.
+public static class DbFaultInjection
+{
+    public static Action<string> Hook;
+}
+#endif
+
+// Makes the rename of a file durable on Linux/Android by flushing the folder itself. Best effort: if it isn't available it does nothing.
+// (P/Invoke can't live inside a generic class, that's why this is a separate class.)
+internal static class DirectorySync
+{
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int sys_open(string path, int flags);
+
+    [DllImport("libc", EntryPoint = "fsync")]
+    private static extern int sys_fsync(int fd);
+
+    [DllImport("libc", EntryPoint = "close")]
+    private static extern int sys_close(int fd);
+
+    private static bool _unavailable;
+
+    public static bool TrySync(string directory)
+    {
+        if (_unavailable || string.IsNullOrEmpty(directory) || !(OperatingSystem.IsLinux() || OperatingSystem.IsAndroid()))
+            return false;
+
+        try
+        {
+            int fd = sys_open(directory, 0);   // 0 = O_RDONLY, works on directories
+            if (fd < 0)
+                return false;
+
+            try { return sys_fsync(fd) == 0; }
+            finally { sys_close(fd); }
+        }
+        catch (Exception e) when (e is DllNotFoundException || e is EntryPointNotFoundException)
+        {
+            _unavailable = true;
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+
 /// <summary>
 /// A tiny text database: one row per line, rows look like
 ///   &lt;db.ID&gt;1&lt;/db.ID&gt;&lt;db.br/&gt;&lt;db.Text&gt;hello&lt;/db.Text&gt;&lt;db.br/&gt;&lt;db.__v&gt;2&lt;/db.__v&gt;
@@ -24,8 +76,15 @@ public static class DbLog
 /// What makes it safe:
 ///  - Every operation on a file takes one in-process lock that is shared by ALL DataSet instances of that path
 ///    (so several "new AppDb()" instances and several threads are fine). Nothing polls or retries on exceptions.
-///  - Rewrites (Update/Remove) go to "file.tmp" first and replace the real file with an atomic rename,
-///    so a crash never leaves a half-written database.
+///  - Update/Remove never edit the real file. They write the complete new content to "file.tmp", check it, and swap it in
+///    with an atomic rename, so a crash never leaves a half-written database.
+///  - Update/Remove first write a small JOURNAL ("file.journal": what to change + a checksum). If the app dies at any point
+///    of the work, the first access to that file in the next run finishes the job (the replay is idempotent, so it doesn't
+///    matter how far the first attempt got). If the app dies before the journal is complete, nothing happened at all.
+///    An operation that throws an exception is NOT redone later: the caller was told it failed.
+///  - Add(list) is journaled too (a list is added completely or not at all), and so is every Add of a durable dataset.
+///  - durable = true datasets additionally: flush every file to the storage chip (and the folder entry after
+///    a rename), and keep the previous version as "file.bak" (used automatically if the main file ever goes missing).
 ///  - Add only appends. A torn last row (crash while appending) is ignored when reading and cut off before the next append.
 ///  - Numbers and dates are written with the invariant culture, so changing the phone language/region can't break reading.
 ///    Old rows (written with the device culture) are still read the old way.
@@ -44,8 +103,8 @@ public partial class DataSet<TModel>
     private const int BufferSize = 60 * 1024;
 
     private static readonly UTF8Encoding Utf8NoBom = new UTF8Encoding(false);
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates =
-        new ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, PathState> States =
+        new ConcurrentDictionary<string, PathState>(StringComparer.Ordinal);
     private static ModelInfo _modelInfo;
 
     private string KeyName { get; set; }
@@ -53,7 +112,7 @@ public partial class DataSet<TModel>
     private Type ModelType { get; set; }
 
     private readonly string _fullPath;
-    private readonly SemaphoreSlim _gate;
+    private readonly PathState _state;
     private readonly bool _durable;
     private readonly ModelInfo _info;
 
@@ -79,7 +138,7 @@ public partial class DataSet<TModel>
             throw new InvalidOperationException("Both Key and FilePath must be set in Configuration().");
 
         _fullPath = Path.GetFullPath(FilePath);
-        _gate = Gates.GetOrAdd(_fullPath, _ => new SemaphoreSlim(1, 1));
+        _state = States.GetOrAdd(_fullPath, _ => new PathState());
     }
 
 
@@ -96,7 +155,7 @@ public partial class DataSet<TModel>
             throw new InvalidOperationException($"This configuration only works with model type {ModelType.Name}.");
 
         string row = BuildRow(model);
-        await Locked(() => AppendRows(new[] { row })).ConfigureAwait(false);
+        await Locked(() => DoAdd(new[] { row })).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -121,7 +180,7 @@ public partial class DataSet<TModel>
             rows[i] = BuildRow(model);
         }
 
-        await Locked(() => AppendRows(rows)).ConfigureAwait(false);
+        await Locked(() => DoAdd(rows)).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -188,9 +247,8 @@ public partial class DataSet<TModel>
     /// </summary>
     public async Task Remove<T>(T id)
     {
-        string key = KeyToText(id);
-        await Locked(() => Rewrite(line => string.Equals(ExtractKey(line), key, StringComparison.Ordinal) ? null : line))
-            .ConfigureAwait(false);
+        var keys = new HashSet<string>(StringComparer.Ordinal) { KeyToText(id) };
+        await Locked(() => DoRemove(keys)).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -201,9 +259,8 @@ public partial class DataSet<TModel>
         if (model == null)
             throw new ArgumentNullException(nameof(model));
 
-        string key = GetKeyText(model);
-        await Locked(() => Rewrite(line => string.Equals(ExtractKey(line), key, StringComparison.Ordinal) ? null : line))
-            .ConfigureAwait(false);
+        var keys = new HashSet<string>(StringComparer.Ordinal) { GetKeyText(model) };
+        await Locked(() => DoRemove(keys)).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -220,11 +277,7 @@ public partial class DataSet<TModel>
         foreach (var model in models)
             keys.Add(GetKeyText(model));
 
-        await Locked(() => Rewrite(line =>
-        {
-            var key = ExtractKey(line);
-            return key != null && keys.Contains(key) ? null : line;
-        })).ConfigureAwait(false);
+        await Locked(() => DoRemove(keys)).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -237,17 +290,8 @@ public partial class DataSet<TModel>
         if (model.GetType() != ModelType)
             throw new InvalidOperationException($"This configuration only works with model type {ModelType.Name}.");
 
-        string key = GetKeyText(model);
-        string newRow = BuildRow(model);
-
-        await Locked(() => Rewrite(line =>
-        {
-            if (!string.Equals(ExtractKey(line), key, StringComparison.Ordinal))
-                return line;
-
-            // Same content: keep the very same string so nothing is rewritten on disk.
-            return string.Equals(line, newRow, StringComparison.Ordinal) ? line : newRow;
-        })).ConfigureAwait(false);
+        var rows = new Dictionary<string, string>(StringComparer.Ordinal) { [GetKeyText(model)] = BuildRow(model) };
+        await Locked(() => DoUpdate(rows)).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -271,14 +315,7 @@ public partial class DataSet<TModel>
             rows[GetKeyText(model)] = BuildRow(model);
         }
 
-        await Locked(() => Rewrite(line =>
-        {
-            var key = ExtractKey(line);
-            if (key == null || !rows.TryGetValue(key, out var newRow))
-                return line;
-
-            return string.Equals(line, newRow, StringComparison.Ordinal) ? line : newRow;
-        })).ConfigureAwait(false);
+        await Locked(() => DoUpdate(rows)).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -289,8 +326,13 @@ public partial class DataSet<TModel>
     {
         await Locked(() =>
         {
-            if (File.Exists(_fullPath)) File.Delete(_fullPath);
-            if (File.Exists(_fullPath + ".tmp")) File.Delete(_fullPath + ".tmp");
+            // The main file goes last: if we die in the middle, the old data is still there (never a .bak that resurrects deleted data).
+            DeleteQuietly(JournalPath);
+            DeleteQuietly(JournalTmpPath);
+            DeleteQuietly(TmpPath);
+            DeleteQuietly(BakPath);
+            if (File.Exists(_fullPath))
+                File.Delete(_fullPath);
         }).ConfigureAwait(false);
     }
 
@@ -338,16 +380,30 @@ public partial class DataSet<TModel>
     // so an uncontended call still finishes before it returns (code that fires these without await keeps working).
     private async Task<T> Locked<T>(Func<T> body)
     {
-        await _gate.WaitAsync().ConfigureAwait(false);
-        try { return body(); }
-        finally { _gate.Release(); }
+        await _state.Gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            EnsureRecovered();
+            return body();
+        }
+        finally { _state.Gate.Release(); }
     }
 
     private async Task Locked(Action body)
     {
-        await _gate.WaitAsync().ConfigureAwait(false);
-        try { body(); }
-        finally { _gate.Release(); }
+        await _state.Gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            EnsureRecovered();
+            body();
+        }
+        finally { _state.Gate.Release(); }
+    }
+
+    private sealed class PathState
+    {
+        public readonly SemaphoreSlim Gate = new SemaphoreSlim(1, 1);
+        public bool Recovered;   // only touched while holding Gate
     }
 
 
@@ -402,6 +458,26 @@ public partial class DataSet<TModel>
             DbLog.Log?.Invoke($"[{Path.GetFileName(_fullPath)}] ignored an incomplete last row ({sb.Length} chars).");
     }
 
+    private string TmpPath => _fullPath + ".tmp";
+    private string BakPath => _fullPath + ".bak";
+    private string JournalPath => _fullPath + ".journal";
+    private string JournalTmpPath => _fullPath + ".journal.tmp";
+
+    [Conditional("DBTEST")]
+    private static void Hook(string point)
+    {
+#if DBTEST
+        DbFaultInjection.Hook?.Invoke(point);
+#endif
+    }
+
+    private static void DeleteQuietly(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
+
+    private void SyncDirectory() => DirectorySync.TrySync(Path.GetDirectoryName(_fullPath));
+
     private void AppendRows(string[] rows)
     {
         EnsureDirectory();
@@ -415,8 +491,18 @@ public partial class DataSet<TModel>
             sb.Append(row).Append('\n');
 
         var bytes = Utf8NoBom.GetBytes(sb.ToString());
+#if DBTEST
+        // lets a test die with half of the rows written
+        fs.Write(bytes, 0, bytes.Length / 2);
+        fs.Flush();
+        Hook("add-half");
+        fs.Write(bytes, bytes.Length / 2, bytes.Length - bytes.Length / 2);
+#else
         fs.Write(bytes, 0, bytes.Length);
+#endif
         fs.Flush(_durable);
+        if (_durable)
+            SyncDirectory();
     }
 
     // If the file doesn't end with '\n' the last row was torn by a crash: cut it off so the next row starts on a clean line.
@@ -454,14 +540,17 @@ public partial class DataSet<TModel>
     }
 
     // map(line): return the same string = keep, another string = replace, null = delete.
-    // The new content is written to "file.tmp" and swapped in with an atomic rename, only if something really changed.
+    // The new content is written completely to "file.tmp", checked, and only then swapped in with an atomic rename
+    // (and only if something really changed). The real file is never edited in place.
     private int Rewrite(Func<string, string> map)
     {
         if (!File.Exists(_fullPath))
             return 0;
 
-        string tmp = _fullPath + ".tmp";
+        string tmp = TmpPath;
         int changed = 0;
+        long expectedBytes = 0;
+        bool movedToBak = false;
 
         try
         {
@@ -478,12 +567,21 @@ public partial class DataSet<TModel>
                     {
                         writer.Write(result);
                         writer.Write('\n');
+                        expectedBytes += Utf8NoBom.GetByteCount(result) + 1;
                     }
+
+                    Hook("tmp-writing");
                 }
 
                 writer.Flush();
                 dst.Flush(_durable);
+
+                // a short write (full disk...) must never replace a good file
+                if (dst.Length != expectedBytes)
+                    throw new IOException($"The new content of {Path.GetFileName(_fullPath)} is incomplete ({dst.Length} of {expectedBytes} bytes).");
             }
+
+            Hook("tmp-written");
 
             if (changed == 0)
             {
@@ -491,13 +589,270 @@ public partial class DataSet<TModel>
                 return 0;
             }
 
+            if (_durable)
+            {
+                // keep the previous version; if we die between the two renames the next run restores it and finishes the job
+                File.Move(_fullPath, BakPath, true);
+                movedToBak = true;
+                Hook("main-to-bak");
+            }
+
             File.Move(tmp, _fullPath, true);
+            movedToBak = false;
+            Hook("tmp-to-main");
+
+            if (_durable)
+                SyncDirectory();
+
             return changed;
         }
         catch
         {
-            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            // undo a half done swap
+            if (movedToBak && !File.Exists(_fullPath) && File.Exists(BakPath))
+            {
+                try { File.Move(BakPath, _fullPath, false); } catch { }
+            }
+
+            DeleteQuietly(tmp);
             throw;
+        }
+    }
+
+
+    // ------------------------------------------------------------------------------------------------ journal (finish interrupted work)
+
+    private enum JournalOp { Add, Update, Remove }
+
+    private sealed class JournalData
+    {
+        public JournalOp Op;
+        public List<string> Lines;
+    }
+
+    private void DoAdd(string[] rows)
+    {
+        // A single row is all-or-nothing by itself (a torn row is dropped). Several rows (or any row of a durable dataset)
+        // go through the journal, so an interrupted Add is completed by the next run: never half of a list.
+        if (_durable || rows.Length > 1)
+            Journaled(JournalOp.Add, rows, () => AppendRows(rows));
+        else
+            AppendRows(rows);
+    }
+
+    private void DoUpdate(Dictionary<string, string> rows)
+    {
+        if (!File.Exists(_fullPath))
+            return;
+
+        Journaled(JournalOp.Update, rows.Values.ToList(), () => Rewrite(MapUpdate(rows)));
+    }
+
+    private void DoRemove(HashSet<string> keys)
+    {
+        if (!File.Exists(_fullPath))
+            return;
+
+        Journaled(JournalOp.Remove, keys.ToList(), () => Rewrite(MapRemove(keys)));
+    }
+
+    private Func<string, string> MapUpdate(Dictionary<string, string> rows) => line =>
+    {
+        var key = ExtractKey(line);
+        if (key == null || !rows.TryGetValue(key, out var newRow))
+            return line;
+
+        // Same content: keep the very same string so nothing is rewritten on disk.
+        return string.Equals(line, newRow, StringComparison.Ordinal) ? line : newRow;
+    };
+
+    private Func<string, string> MapRemove(HashSet<string> keys) => line =>
+    {
+        var key = ExtractKey(line);
+        return key != null && keys.Contains(key) ? null : line;
+    };
+
+    // 1. write the journal (complete or not at all)  2. do the work  3. delete the journal.
+    private void Journaled(JournalOp op, IReadOnlyList<string> lines, Action apply)
+    {
+        WriteJournal(op, lines);
+        Hook("journal-written");
+
+        try
+        {
+            apply();
+        }
+        catch
+        {
+            // The caller gets this exception, so the operation must not be redone later.
+            // Only exception: a swap that died between its two renames left no main file; keep the journal so recovery finishes it.
+            if (File.Exists(_fullPath) || !File.Exists(BakPath))
+                DeleteQuietly(JournalPath);
+            else
+                _state.Recovered = false;
+
+            throw;
+        }
+
+        DeleteJournal();
+        Hook("journal-deleted");
+    }
+
+    private void DeleteJournal()
+    {
+        if (File.Exists(JournalPath))
+            File.Delete(JournalPath);
+
+        if (_durable)
+            SyncDirectory();
+    }
+
+    // Layout: SLVZJ1 / operation / number of lines / the lines / "#" + SHA-256 of everything before.
+    // It is written to a temp file and renamed, and the checksum rejects a journal that was cut by a power loss.
+    private void WriteJournal(JournalOp op, IReadOnlyList<string> lines)
+    {
+        EnsureDirectory();
+
+        var sb = new StringBuilder();
+        sb.Append("SLVZJ1\n").Append(op.ToString().ToLowerInvariant()).Append('\n').Append(lines.Count).Append('\n');
+        foreach (var line in lines)
+            sb.Append(line).Append('\n');
+
+        string body = sb.ToString();
+        string hash = Convert.ToHexString(SHA256.HashData(Utf8NoBom.GetBytes(body)));
+        var bytes = Utf8NoBom.GetBytes(body + "#" + hash + "\n");
+
+        using (var fs = new FileStream(JournalTmpPath, FileMode.Create, FileAccess.Write, FileShare.None, BufferSize))
+        {
+            fs.Write(bytes, 0, bytes.Length);
+            fs.Flush(_durable);
+        }
+
+        Hook("journal-tmp-written");
+        File.Move(JournalTmpPath, JournalPath, true);
+
+        if (_durable)
+            SyncDirectory();
+    }
+
+    private JournalData ReadJournal()
+    {
+        try
+        {
+            string text = File.ReadAllText(JournalPath, Utf8NoBom);
+            if (text.Length < 2 || text[text.Length - 1] != '\n')
+                return null;
+
+            int trailerStart = text.LastIndexOf('\n', text.Length - 2) + 1;
+            string trailer = text.Substring(trailerStart).TrimEnd('\n');
+            if (!trailer.StartsWith("#", StringComparison.Ordinal))
+                return null;
+
+            string body = text.Substring(0, trailerStart);
+            string expected = Convert.ToHexString(SHA256.HashData(Utf8NoBom.GetBytes(body)));
+            if (!string.Equals(trailer.Substring(1), expected, StringComparison.Ordinal))
+                return null;
+
+            var parts = body.Split('\n');   // the last element is empty because the body ends with '\n'
+            if (parts.Length < 4 || parts[0] != "SLVZJ1")
+                return null;
+            if (!Enum.TryParse(parts[1], true, out JournalOp op))
+                return null;
+            if (!int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out int count) || parts.Length != 3 + count + 1)
+                return null;
+
+            return new JournalData { Op = op, Lines = parts.Skip(3).Take(count).ToList() };
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
+
+    private void EnsureRecovered()
+    {
+        if (_state.Recovered)
+            return;
+
+        Recover();
+        _state.Recovered = true;
+    }
+
+    // Runs once per file and run of the app, before the first operation. If it throws, it is tried again by the next operation.
+    private void Recover()
+    {
+        string name = Path.GetFileName(_fullPath);
+
+        // unfinished temp files are useless (the journal is what matters)
+        DeleteQuietly(TmpPath);
+        DeleteQuietly(JournalTmpPath);
+
+        // main file missing = we died between the two renames of a rewrite (or it was lost): the previous version is in .bak
+        if (!File.Exists(_fullPath) && File.Exists(BakPath))
+        {
+            File.Copy(BakPath, TmpPath, true);
+            File.Move(TmpPath, _fullPath, false);
+            DbLog.Log?.Invoke($"[{name}] the file was missing, restored the previous version.");
+        }
+
+        if (!File.Exists(JournalPath))
+            return;
+
+        var journal = ReadJournal();
+        if (journal == null)
+        {
+            // never completed = the operation never started (nothing was changed yet)
+            DbLog.Log?.Invoke($"[{name}] ignored an incomplete journal.");
+            DeleteQuietly(JournalPath);
+            return;
+        }
+
+        DbLog.Log?.Invoke($"[{name}] finishing an interrupted {journal.Op.ToString().ToLowerInvariant()} ({journal.Lines.Count} rows).");
+        Replay(journal);
+        DeleteJournal();
+    }
+
+    // Every replay is idempotent: running it again after it already (partly) happened gives the same final state.
+    private void Replay(JournalData journal)
+    {
+        switch (journal.Op)
+        {
+            case JournalOp.Update:
+            {
+                var rows = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var row in journal.Lines)
+                {
+                    var key = ExtractKey(row);
+                    if (key != null)
+                        rows[key] = row;
+                }
+                Rewrite(MapUpdate(rows));
+                break;
+            }
+
+            case JournalOp.Remove:
+                Rewrite(MapRemove(new HashSet<string>(journal.Lines, StringComparer.Ordinal)));
+                break;
+
+            case JournalOp.Add:
+            {
+                // rows that already reached the end of the file (before the crash) must not be added twice
+                var existing = EnumerateRows().ToList();
+                int skip = Math.Min(journal.Lines.Count, existing.Count);
+                for (; skip > 0; skip--)
+                {
+                    bool same = true;
+                    for (int i = 0; i < skip && same; i++)
+                        same = string.Equals(existing[existing.Count - skip + i], journal.Lines[i], StringComparison.Ordinal);
+
+                    if (same)
+                        break;
+                }
+
+                if (skip < journal.Lines.Count)
+                    AppendRows(journal.Lines.Skip(skip).ToArray());
+                break;
+            }
         }
     }
 
