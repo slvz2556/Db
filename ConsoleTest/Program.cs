@@ -1,4 +1,4 @@
-﻿using SLVZ.Db;
+﻿using SLVZ.Db.SideDbContexts;
 using System.ComponentModel;
 
 var db = new myDB();
@@ -103,5 +103,5 @@ class myDB : DbContext
         models = DataSet<myModel>();
     }
 
-    public DataSet<myModel>? models;
+    public DataSet2<myModel>? models;
 }

@@ -2,12 +2,14 @@
 namespace SLVZ.Db;
 
 /// <summary>
-/// It has to be a type of Int64
+/// Defines the unique key used by the database to identify the record
+/// It can be any type
 /// </summary>
 [AttributeUsage(AttributeTargets.Property)]
-public sealed class PrimaryKey : Attribute
+public sealed class Key : Attribute
 {
 }
+
 [AttributeUsage(AttributeTargets.All)]
 public sealed class Ignore : Attribute
 {
